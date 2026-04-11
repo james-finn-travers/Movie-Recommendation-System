@@ -19,9 +19,11 @@ import pandas as pd
 from scipy import sparse
 from sklearn.neighbors import NearestNeighbors
 
+from rust_bridge import aggregate_ratings_csv, has_rust_extension
+
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
-ROOT = Path("/home/james/Movie-Recommendation-System")
+ROOT = Path(__file__).resolve().parent
 CHUNK = 500_000  # small to keep peak memory low
 
 
@@ -38,6 +40,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--k-neighbors", type=int, default=25)
     p.add_argument("--min-neighbor-votes", type=int, default=2)
     p.add_argument("--results-path", type=Path, default=ROOT / "benchmark_results.csv")
+    p.add_argument(
+        "--use-rust-loader",
+        action="store_true",
+        help="Use the Rust extension for CSV movie aggregation when available.",
+    )
     p.add_argument("--seed", type=int, default=42)
     return p.parse_args()
 
@@ -52,24 +59,32 @@ def main():
     movie_tags = sparse.load_npz(args.movie_tags).tocsr()
     user_index_to_id = np.load(args.user_index)
 
-    # ── Pass 1: stats via numpy only ──────────────────────────────────────────
+    # ── Pass 1: stats via Rust/Python loader and numpy user aggregation ──────
     print("Pass 1: stats (numpy bincount, no groupby)...", flush=True)
     t1 = time.time()
 
     # Pre-allocate: max movieId = movie_tags.shape[0]-1, max userId ~ 330K
     max_mid = movie_tags.shape[0]  # 288984
-    movie_rating_sum = np.zeros(max_mid + 1, dtype=np.float64)
-    movie_rating_cnt = np.zeros(max_mid + 1, dtype=np.int32)
+    if args.use_rust_loader:
+        if has_rust_extension():
+            print("  Using Rust CSV loader for movie aggregates...", flush=True)
+        else:
+            print("  Rust extension not installed; using Python fallback loader.", flush=True)
+        movie_rating_cnt, movie_rating_sum, max_uid = aggregate_ratings_csv(csv_path, max_mid)
+        movie_rating_cnt = movie_rating_cnt.astype(np.int32, copy=False)
+    else:
+        movie_rating_sum = np.zeros(max_mid + 1, dtype=np.float64)
+        movie_rating_cnt = np.zeros(max_mid + 1, dtype=np.int32)
 
-    # First mini-pass: find max userId
-    max_uid = 0
-    for chunk in pd.read_csv(csv_path, usecols=["userId"],
-                             dtype={"userId": "uint32"}, chunksize=CHUNK):
-        cmax = int(chunk["userId"].max())
-        if cmax > max_uid:
-            max_uid = cmax
-        del chunk
-    gc.collect()
+        # First mini-pass: find max userId
+        max_uid = 0
+        for chunk in pd.read_csv(csv_path, usecols=["userId"],
+                                 dtype={"userId": "uint32"}, chunksize=CHUNK):
+            cmax = int(chunk["userId"].max())
+            if cmax > max_uid:
+                max_uid = cmax
+            del chunk
+        gc.collect()
 
     user_count = np.zeros(max_uid + 1, dtype=np.int32)
     user_last_ts = np.zeros(max_uid + 1, dtype=np.uint32)
@@ -86,21 +101,22 @@ def main():
         del chunk
         gc.collect()
 
-        # Per-movie: accumulate with bincount
-        valid_mid = mids <= max_mid
-        if not np.all(valid_mid):
-            v_mids = mids[valid_mid]
-            v_rats = rats[valid_mid]
-        else:
-            v_mids = mids
-            v_rats = rats
+        if not args.use_rust_loader:
+            # Per-movie: accumulate with bincount
+            valid_mid = mids <= max_mid
+            if not np.all(valid_mid):
+                v_mids = mids[valid_mid]
+                v_rats = rats[valid_mid]
+            else:
+                v_mids = mids
+                v_rats = rats
 
-        movie_rating_sum[:len(movie_rating_sum)] += np.bincount(
-            v_mids, weights=v_rats, minlength=max_mid + 1
-        )
-        movie_rating_cnt[:len(movie_rating_cnt)] += np.bincount(
-            v_mids, minlength=max_mid + 1
-        ).astype(np.int32)
+            movie_rating_sum[:len(movie_rating_sum)] += np.bincount(
+                v_mids, weights=v_rats, minlength=max_mid + 1
+            )
+            movie_rating_cnt[:len(movie_rating_cnt)] += np.bincount(
+                v_mids, minlength=max_mid + 1
+            ).astype(np.int32)
 
         # Per-user: count
         np.add.at(user_count, uids, 1)
