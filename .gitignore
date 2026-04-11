@@ -4,3 +4,37 @@
 *.dat
 **/ml-latest/
 **/ml-latest-small/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Rust
+target/
+
+# IDE
+.idea/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/
+
+# Additional Python
+.env
+.coverage
+htmlcov/
+
+# Temporary files
+*.tmp
+*.bak
