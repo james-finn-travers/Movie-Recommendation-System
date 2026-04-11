@@ -1,0 +1,6 @@
+# NumPy array artifacts
+*.npy
+*.npz
+*.dat
+**/ml-latest/
+**/ml-latest-small/

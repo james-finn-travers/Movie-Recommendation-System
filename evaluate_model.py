@@ -21,8 +21,49 @@ from sklearn.neighbors import NearestNeighbors
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
-ROOT = Path("/home/james/Movie-Recommendation-System")
+ROOT = Path(__file__).resolve().parent
 CHUNK = 500_000  # small to keep peak memory low
+
+
+def ensure_movie_tags(movie_tags_path: Path, data_dir: Path) -> None:
+    """Build movie_tags.npz from MovieLens genome-scores if artifact is missing."""
+    if movie_tags_path.exists():
+        return
+
+    genome_scores_path = data_dir / "genome-scores.csv"
+    genome_tags_path = data_dir / "genome-tags.csv"
+    movies_path = data_dir / "movies.csv"
+    required = [genome_scores_path, genome_tags_path, movies_path]
+    missing = [str(p) for p in required if not p.exists()]
+    if missing:
+        raise FileNotFoundError(
+            "movie_tags.npz is missing and could not be rebuilt. "
+            f"Missing required files: {', '.join(missing)}"
+        )
+
+    print(f"movie_tags artifact not found at {movie_tags_path}; rebuilding...", flush=True)
+    max_movie = int(pd.read_csv(movies_path, usecols=["movieId"])["movieId"].max())
+    max_tag = int(pd.read_csv(genome_tags_path, usecols=["tagId"])["tagId"].max())
+
+    movie_tags = sparse.csr_matrix((max_movie + 1, max_tag + 1), dtype=np.float32)
+    for chunk in pd.read_csv(
+        genome_scores_path,
+        usecols=["movieId", "tagId", "relevance"],
+        dtype={"movieId": "uint32", "tagId": "uint16", "relevance": "float32"},
+        chunksize=1_000_000,
+    ):
+        rows = chunk["movieId"].to_numpy(dtype=np.int32, copy=False)
+        cols = chunk["tagId"].to_numpy(dtype=np.int32, copy=False)
+        vals = chunk["relevance"].to_numpy(dtype=np.float32, copy=False)
+        movie_tags += sparse.coo_matrix(
+            (vals, (rows, cols)),
+            shape=(max_movie + 1, max_tag + 1),
+            dtype=np.float32,
+        ).tocsr()
+
+    movie_tags_path.parent.mkdir(parents=True, exist_ok=True)
+    sparse.save_npz(movie_tags_path, movie_tags)
+    print(f"Saved rebuilt movie_tags to {movie_tags_path}", flush=True)
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,6 +88,8 @@ def main():
     rng = np.random.default_rng(args.seed)
     t0 = time.time()
     csv_path = args.data_dir / "ratings.csv"
+
+    ensure_movie_tags(args.movie_tags, args.data_dir)
 
     print("Loading movie_tags...", flush=True)
     movie_tags = sparse.load_npz(args.movie_tags).tocsr()
