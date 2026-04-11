@@ -1,6 +1,6 @@
-# Movie Recommendation System
+# Hybrid Inference Engine
 
-Movie recommendation project built on the MovieLens latest dataset.
+Hybrid Inference Engine project built on the MovieLens latest dataset.
 The system combines content-based features (genome tag relevance) with user-user collaborative filtering to generate personalized recommendations.
 
 ## Overview
