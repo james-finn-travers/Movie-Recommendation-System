@@ -1,19 +1,6 @@
 # Hybrid Inference Engine
 
-Hybrid recommender system built on MovieLens data, designed to demonstrate production-style data pipelines, low-memory inference, and benchmark-driven model governance.
-
-For data engineering and quant-facing roles, this repository emphasizes:
-
-- Streaming data processing over large CSVs.
-- Deterministic artifact generation (`.npz`, memmap, index mapping).
-- Repeatable offline evaluation with latency and ranking metrics.
-- Regression gates suitable for CI/CD-style quality control.
-
-## Why This Project Matters
-
-- **Data Engineering:** chunked ingestion, schema-aware typing, sparse matrix artifacts, and reproducible pipelines.
-- **Quant Research:** measurable ranking quality (`Precision@K`, `Recall@K`, `NDCG@K`) plus latency distribution tracking (`p50/p95/p99`).
-- **MLOps Mindset:** benchmark checkpointing, run-over-run deltas, and pass/fail gates.
+Hybrid recommender system built on MovieLens data. Focuses on reproducible offline evaluation, low-memory inference, and benchmark-driven quality control rather than accuracy maximisation.
 
 ## Pipeline Summary
 
@@ -30,7 +17,7 @@ For data engineering and quant-facing roles, this repository emphasizes:
   - `MOVIELENS_DIR` environment override,
   - optional auto-download of MovieLens (`MOVIELENS_AUTO_DOWNLOAD=1`, default enabled).
 - `evaluate_model.py` now defaults paths relative to this repository and can auto-rebuild `movie_tags.npz` from CSVs when missing.
-- User preference matrix creation uses `rust_bridge.py` with a Python fallback when an older Rust extension build is loaded.
+- User preference matrix creation uses `rust_bridge.py` with a pure-Python fallback when the `hybrid_rust` extension is not installed or was built without `populate_user_preferences_matrix` (older build). See [Rust Extension](#rust-extension-optional) in Setup.
 
 ## Architecture
 
@@ -44,6 +31,7 @@ flowchart LR
 - **Ingestion:** chunked pandas readers with explicit dtypes to bound memory and improve parse consistency.
 - **Feature Build:** `scipy.sparse` for movie-tag relevance and `numpy.memmap` for user preference storage.
 - **Inference/Eval:** brute-force cosine KNN over user vectors, checkpointed benchmarking, and regression reporting.
+- **Parallelism:** the Rust extension uses [Rayon](https://docs.rs/rayon) to compute user preference vectors concurrently. After a sequential CSV pass that groups ratings by user, each user's weighted tag-relevance vector is computed independently — no shared mutable state — and Rayon distributes the work across the available CPU threads. The pure-Python fallback performs the same computation serially.
 
 ## Project Structure
 
@@ -86,6 +74,9 @@ Core generated artifacts:
   - matplotlib
   - ipywidgets
   - jupyter
+- Rust extension (optional, recommended for faster user-preference builds):
+  - Rust toolchain (`rustup` / `cargo`) — https://rustup.rs
+  - `maturin` (`pip install maturin`)
 
 ## Setup
 
@@ -97,6 +88,19 @@ source .venv/bin/activate
 pip install --upgrade pip
 pip install numpy pandas scipy scikit-learn matplotlib ipywidgets jupyter
 ```
+
+### Rust Extension (optional)
+
+Builds the `hybrid_rust` PyO3 extension used by `rust_bridge.py` for accelerated user-preference matrix construction. If skipped, the pure-Python fallback is used automatically.
+
+```bash
+pip install maturin
+cd rust_ext
+maturin develop --release
+cd ..
+```
+
+The built extension is loaded at import time by `rust_bridge.py`. Rebuild after any changes to `rust_ext/src/lib.rs`.
 
 Place or unzip MovieLens data under:
 
@@ -183,16 +187,6 @@ python3 run_benchmark_pipeline.py \
   --results-path ./benchmark_results.csv \
   --report-path ./benchmark_report.md
 ```
-
-## Quant and DE Signals
-
-Use these points in interviews or portfolio writeups:
-
-- Built a reproducible recommender research pipeline with explicit artifacts and typed data contracts.
-- Added robust fallback logic for missing inputs (dataset resolution, auto-download, artifact rebuild).
-- Implemented checkpointed benchmark logging for time-series model governance.
-- Included regression gating for both quality drift and latency SLO-style controls.
-- Used out-of-core and sparse strategies to keep memory usage bounded on commodity hardware.
 
 ## Performance Notes
 

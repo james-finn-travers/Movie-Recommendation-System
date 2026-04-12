@@ -21,6 +21,11 @@ from sklearn.neighbors import NearestNeighbors
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
+try:
+    import rust_bridge as _rust_bridge
+except Exception:  # pragma: no cover
+    _rust_bridge = None  # type: ignore[assignment]
+
 ROOT = Path(__file__).resolve().parent
 CHUNK = 500_000  # small to keep peak memory low
 
@@ -66,6 +71,63 @@ def ensure_movie_tags(movie_tags_path: Path, data_dir: Path) -> None:
     print(f"Saved rebuilt movie_tags to {movie_tags_path}", flush=True)
 
 
+def ensure_user_prefs(
+    prefs_path: Path,
+    user_index_path: Path,
+    data_dir: Path,
+    movie_tags_shape: tuple[int, int],
+    max_active_users: int = 50_000,
+    rating_scale: float = 5.0,
+) -> None:
+    """Build users_preferences.dat and user_index_to_id.npy via rust_bridge if missing."""
+    if prefs_path.exists() and user_index_path.exists():
+        return
+
+    if _rust_bridge is None:
+        missing = []
+        if not prefs_path.exists():
+            missing.append(str(prefs_path))
+        if not user_index_path.exists():
+            missing.append(str(user_index_path))
+        raise FileNotFoundError(
+            "Required artifacts are missing and rust_bridge is not available to rebuild them.\n"
+            f"Missing: {', '.join(missing)}\n"
+            "Run the Movie_Recommendation_System notebook (Cell 26-28) to generate them, "
+            "or install the hybrid_rust extension (maturin build --release in rust_ext/)."
+        )
+
+    genome_scores_path = data_dir / "genome-scores.csv"
+    ratings_path = data_dir / "ratings.csv"
+    num_movies = movie_tags_shape[0] - 1
+    num_tags = movie_tags_shape[1] - 1
+
+    print(
+        f"Preference artifacts not found; rebuilding via rust_bridge "
+        f"(max_active_users={max_active_users})...",
+        flush=True,
+    )
+    user_index_to_id, users_preferences = _rust_bridge.build_user_preferences_from_csv(
+        ratings_csv_path=ratings_path,
+        genome_scores_csv_path=genome_scores_path,
+        max_active_users=max_active_users,
+        rating_scale=rating_scale,
+        num_movies=num_movies,
+        num_tags=num_tags,
+    )
+
+    np.save(user_index_path, user_index_to_id)
+    prefs_path.parent.mkdir(parents=True, exist_ok=True)
+    memmap = np.memmap(prefs_path, dtype=np.float32, mode="w+", shape=users_preferences.shape)
+    memmap[:] = users_preferences
+    memmap.flush()
+    del memmap
+    print(
+        f"Saved user_index_to_id.npy ({len(user_index_to_id):,} users) "
+        f"and users_preferences.dat {users_preferences.shape}",
+        flush=True,
+    )
+
+
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--data-dir", type=Path, default=ROOT / "ml-latest")
@@ -93,6 +155,14 @@ def main():
 
     print("Loading movie_tags...", flush=True)
     movie_tags = sparse.load_npz(args.movie_tags).tocsr()
+
+    ensure_user_prefs(
+        prefs_path=args.prefs,
+        user_index_path=args.user_index,
+        data_dir=args.data_dir,
+        movie_tags_shape=movie_tags.shape,
+    )
+
     user_index_to_id = np.load(args.user_index)
 
     # ── Pass 1: stats via numpy only ──────────────────────────────────────────

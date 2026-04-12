@@ -5,6 +5,7 @@ use std::process::Command;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use rayon::prelude::*;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -108,8 +109,7 @@ fn populate_user_preferences_matrix(
 
     let mut user_id_to_index: HashMap<u32, usize> = HashMap::new();
     let mut user_index_to_id: Vec<u32> = Vec::with_capacity(max_active_users);
-    let mut numerator: Vec<Vec<f32>> = Vec::with_capacity(max_active_users);
-    let mut denominator: Vec<Vec<f32>> = Vec::with_capacity(max_active_users);
+    let mut ratings_by_user: Vec<Vec<(u32, f32)>> = Vec::with_capacity(max_active_users);
 
     let mut ratings_reader = csv::Reader::from_path(ratings_path)
         .map_err(|e| PyRuntimeError::new_err(format!("failed to read ratings csv: {e}")))?;
@@ -127,33 +127,42 @@ fn populate_user_preferences_matrix(
             let next_idx = user_index_to_id.len();
             user_id_to_index.insert(record.user_id, next_idx);
             user_index_to_id.push(record.user_id);
-            numerator.push(vec![0.0; n_tags]);
-            denominator.push(vec![0.0; n_tags]);
+            ratings_by_user.push(Vec::new());
             next_idx
         };
 
-        let tag_rows = if let Some(rows) = movie_tag_relevance.get(&record.movie_id) {
-            rows
-        } else {
-            continue;
-        };
-
-        let normalized_rating = record.rating / rating_scale;
-        for (tag_id, relevance) in tag_rows {
-            numerator[user_index][*tag_id] += normalized_rating * *relevance;
-            denominator[user_index][*tag_id] += *relevance;
-        }
+        ratings_by_user[user_index].push((record.movie_id, record.rating));
     }
 
-    let mut preferences = vec![vec![0.0f32; n_tags]; user_index_to_id.len()];
-    for user_idx in 0..user_index_to_id.len() {
-        for tag_idx in 0..n_tags {
-            let den = denominator[user_idx][tag_idx];
-            if den > 0.0 {
-                preferences[user_idx][tag_idx] = numerator[user_idx][tag_idx] / den;
+    // Compute each user's preference vector in parallel — no shared mutable state.
+    let preferences: Vec<Vec<f32>> = ratings_by_user
+        .par_iter()
+        .map(|user_ratings| {
+            let mut numerator = vec![0.0f32; n_tags];
+            let mut denominator = vec![0.0f32; n_tags];
+
+            for (movie_id, rating) in user_ratings {
+                let normalized = rating / rating_scale;
+                if let Some(tag_rows) = movie_tag_relevance.get(movie_id) {
+                    for (tag_id, relevance) in tag_rows {
+                        numerator[*tag_id] += normalized * relevance;
+                        denominator[*tag_id] += relevance;
+                    }
+                }
             }
-        }
-    }
+
+            numerator
+                .iter_mut()
+                .zip(denominator.iter())
+                .for_each(|(n, d)| {
+                    if *d > 0.0 {
+                        *n /= *d;
+                    }
+                });
+
+            numerator
+        })
+        .collect();
 
     Ok((user_index_to_id, preferences))
 }
